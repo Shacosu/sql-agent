@@ -122,7 +122,6 @@ async function loadDatabaseSchema(): Promise<{ schemaText: string; allowedTables
             lines.push(`TABLE ${fq} ( ${cols.join(', ')} )`);
         }
     }
-    console.log(lines.join('\n'));
     return { schemaText: lines.join('\n'), allowedTables };
 }
 
