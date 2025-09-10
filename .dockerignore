@@ -1,0 +1,20 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+coverage
+
+# Local env
+.env
+.env.*
+
+# VCS
+.git
+.gitignore
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode
+.idea

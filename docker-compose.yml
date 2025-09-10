@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # For reproducible builds you can pass build args here
+    image: farma-rag:prod
+    environment:
+      # App
+      - NODE_ENV=production
+      - PORT=3000
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      # Database
+      - PG_CONNECTION_STRING=${PG_CONNECTION_STRING}
+      # Optional: Nest logs
+      - LOG_LEVEL=${LOG_LEVEL:-log}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    # Healthcheck (optional): waits for HTTP 200 on root
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:3000/" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    # If you will mount .env at runtime, uncomment:
+    # env_file:
+    #   - .env
