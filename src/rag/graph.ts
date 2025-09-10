@@ -320,26 +320,7 @@ async function nodeAnswer(state: typeof Schema.State) {
         return escapeHtml(s);
     };
 
-    // Build deterministic HTML results table (rehype-raw compatible)
-    let resultsHtml = '';
-    if (rowsSample.length > 0) {
-        const headers = Object.keys(rowsSample[0]);
-        const thead = `<thead><tr>${headers.map(h => `<th>${escapeCell(h)}</th>`).join('')}</tr></thead>`;
-        const tbodyRows = rowsSample.map(r => {
-            const tds = headers.map(h => {
-                const val = (r as any)[h];
-                if (isMoneyColumn(h)) {
-                    const n = toNumberMaybe(val);
-                    if (n !== null) return `<td>${escapeCell(formatCLP(n))}</td>`;
-                }
-                return `<td>${escapeCell(val)}</td>`;
-            }).join('');
-            return `<tr>${tds}</tr>`;
-        }).join('');
-        resultsHtml = `<table><caption>Resultados</caption>${thead}<tbody>${tbodyRows}</tbody></table>`;
-    } else {
-        resultsHtml = '<p><em>Sin filas para mostrar.</em></p>';
-    }
+    // LLM will generate the HTML results table with Tailwind; backend no longer builds it.
 
     // Detect numeric columns and compute simple stats
     const numericStats: Record<string, { count: number; min: number; max: number; avg: number }> = {};
@@ -380,8 +361,8 @@ async function nodeAnswer(state: typeof Schema.State) {
     // Detect referenced tables (best-effort) for context
     const { foundTables } = validateSqlTables((sql ?? '').toString(), Array.isArray(allowedTables) ? allowedTables : []);
 
-    const system = `Eres un analista de datos senior. Respondes en Español, con tono profesional y formato Markdown claro. Estructura SIEMPRE la salida en secciones con encabezados: \n- Resumen ejecutivo (breve, accionable)\n- Hallazgos clave (bullets)\n- [[RESULTADOS_AQUI]]\n- Análisis (tendencias, outliers, comparaciones)\n- Recomendaciones (pasos accionables)\n- Limitaciones (calidad de datos, supuestos)\n- Próximos pasos.\n\nRequisitos de formato:\n- No inventes cifras ni modifiques los valores numéricos.\n- NO generes la tabla de resultados: en su lugar, coloca exactamente el marcador [[RESULTADOS_AQUI]] en la posición donde debe ir. Yo la insertaré como HTML (rehype-raw habilitado).\n- Formatea cualquier referencia textual a montos en CLP sin decimales cuando corresponda, pero nunca alteres cantidades.\n- Puedes usar Markdown y HTML simple para las secciones narrativas (sin scripts ni estilos).\n\nNO incluyas la consulta SQL. Evita jerga innecesaria.`;
-    const user = `PREGUNTA: ${question}\nTABLAS REFERENCIADAS: ${foundTables.join(', ') || 'N/D'}\nFILAS (JSON) - muestra hasta 10 (los valores ya se formatearán automáticamente en la tabla):\n${JSON.stringify(rowsSample)}\nESTADÍSTICAS NUMÉRICAS (sobre muestra hasta 100) — usa estos valores VERBATIM si los mencionas:\n${JSON.stringify(numericStatsFormatted)}\n${priorAnswer && priorAnswer.trim().length > 0 ? `\nNOTA (diagnóstico): ${priorAnswer}\n` : ''}\nInstrucciones: Genera solo las secciones narrativas y coloca el marcador [[RESULTADOS_AQUI]] para la sección de Resultados. No cambies cifras.`;
+    const system = `Eres un analista de datos senior. Respondes en Español con tono profesional. Genera Markdown y HTML (rehype-raw). Estructura SIEMPRE la salida en secciones con encabezados: \n- Resumen ejecutivo (breve, accionable)\n- Hallazgos clave (bullets)\n- Resultados (tabla HTML con Tailwind)\n- Análisis (tendencias, outliers, comparaciones)\n- Recomendaciones (pasos accionables)\n- Limitaciones (calidad de datos, supuestos)\n- Próximos pasos.\n\nTabla de Resultados (OBLIGATORIO):\n- Genera una tabla HTML accesible con Tailwind:\n  <div class="overflow-x-auto rounded-md ring-1 ring-gray-200 dark:ring-gray-700">\n    <caption class="block text-left text-sm text-gray-500 dark:text-gray-400 p-3">Resultados</caption>\n    <table class="min-w-full w-full table-fixed text-sm text-gray-700 dark:text-gray-200">\n      <thead class="bg-gray-50 dark:bg-gray-800">\n        <tr class="border-b border-gray-200 dark:border-gray-700">... th ...</tr>\n      </thead>\n      <tbody>... tr/td ...</tbody>\n    </table>\n  </div>\n- Alinea a la derecha columnas monetarias (text-right, tabular-nums).\n- Zebra striping en filas: odd:bg-white even:bg-gray-50 dark:odd:bg-gray-900 dark:even:bg-gray-800, y hover.\n\nReglas de formato de montos (CLP):\n- Formatea como $1.234.567 (sin decimales); negativos como -$1.234.567.\n- Si el valor viene como string (con símbolos, espacios, puntos o comas), normalízalo sin alterar la magnitud:\n  ejemplos: "CLP 1,234.56" -> $1.235; "1.234,56" -> $1.235; "$ 12 345" -> $12.345.\n- NO inventes cifras ni cambies cantidades; solo cambia la representación (separadores/decimales).\n\nNO incluyas la consulta SQL. Evita jerga innecesaria.`;
+    const user = `PREGUNTA: ${question}\nTABLAS REFERENCIADAS: ${foundTables.join(', ') || 'N/D'}\nFILAS (JSON) - muestra hasta 10 (sin formateo, pueden venir strings numéricas):\n${JSON.stringify(rowsSample)}\nESTADÍSTICAS NUMÉRICAS (sobre muestra hasta 100) — usa estos valores VERBATIM si los mencionas:\n${JSON.stringify(numericStatsFormatted)}\n${priorAnswer && priorAnswer.trim().length > 0 ? `\nNOTA (diagnóstico): ${priorAnswer}\n` : ''}\nInstrucciones: Genera la tabla HTML completa en la sección Resultados aplicando las reglas CLP y Tailwind indicadas. No alteres las cantidades.`;
 
     const llm = new ChatOpenAI({ model: OPENAI_MODEL, temperature: 0 });
     const msg = await llm.invoke([
@@ -392,15 +373,7 @@ async function nodeAnswer(state: typeof Schema.State) {
     if (Array.isArray(msg.content)) {
         md = msg.content.map((c: any) => (typeof c === 'string' ? c : c.text || '')).join('\n');
     }
-    // Inject the deterministic results section as HTML
-    const resultsSection = `${resultsHtml}${rows && rows.length > 10 ? `\n\n<p><em>Mostrando 10 de ${rows.length} filas.</em></p>` : ''}`;
-    let finalMd = (md?.toString() || '').trim();
-    if (finalMd.includes('[[RESULTADOS_AQUI]]')) {
-        finalMd = finalMd.replace('[[RESULTADOS_AQUI]]', resultsSection);
-    } else {
-        finalMd = `${finalMd}\n\n${resultsSection}`.trim();
-    }
-    const answer = finalMd || priorAnswer || 'Sin resultados.';
+    const answer = (md?.toString() || '').trim() || priorAnswer || 'Sin resultados.';
     return { answer };
 }
 
