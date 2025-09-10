@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { extractSchemas } from 'extract-pg-schema';
 import { ChatOpenAI } from '@langchain/openai';
 import {
     Annotation,
@@ -64,46 +65,65 @@ function getPool(): Pool {
     return pool;
 }
 
-// Schema loader: read relevant parts of information_schema for public schema
+// Schema loader: use extract-pg-schema for richer, accurate introspection
 async function loadDatabaseSchema(): Promise<{ schemaText: string; allowedTables: string[] }> {
-    const client = await getPool().connect();
-    try {
-        const tablesRes = await client.query<{
-            table_schema: string;
-            table_name: string;
-            column_name: string;
-            data_type: string;
-        }>(
-            `
-      SELECT c.table_schema, c.table_name, c.column_name, c.data_type
-      FROM information_schema.columns c
-      JOIN information_schema.tables t
-        ON c.table_schema = t.table_schema AND c.table_name = t.table_name
-      WHERE t.table_type = 'BASE TABLE' AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
-      ORDER BY c.table_schema, c.table_name, c.ordinal_position;
-      `
-        );
-
-        // Group columns per table
-        const byTable = new Map<string, { schema: string; table: string; columns: string[] }>();
-        for (const row of tablesRes.rows) {
-            const key = `${row.table_schema}.${row.table_name}`;
-            if (!byTable.has(key)) {
-                byTable.set(key, { schema: row.table_schema, table: row.table_name, columns: [] });
-            }
-            byTable.get(key)!.columns.push(`${row.column_name} ${row.data_type}`);
-        }
-
-        const lines: string[] = [];
-        const allowedTables: string[] = [];
-        for (const [key, v] of byTable.entries()) {
-            lines.push(`TABLE ${key} ( ${v.columns.join(', ')} )`);
-            allowedTables.push(key);
-        }
-        return { schemaText: lines.join('\n'), allowedTables };
-    } finally {
-        client.release();
+    if (!PG_CONNECTION_STRING) {
+        throw new Error('PG_CONNECTION_STRING (or DATABASE_URL) is required');
     }
+
+    // Use extract-pg-schema to pull full schema metadata
+    const schemas = (await extractSchemas({ connectionString: PG_CONNECTION_STRING } as any)) as any;
+
+    const lines: string[] = [];
+    const allowedTables: string[] = [];
+
+    const schemaArray: any[] = Array.isArray(schemas) ? schemas : Object.values(schemas ?? {});
+    for (const schema of schemaArray) {
+        const schemaName = (schema as any)?.name as string;
+        if (!schemaName || ['pg_catalog', 'information_schema'].includes(schemaName)) continue;
+
+        // Tables
+        for (const table of ((schema as any)?.tables ?? []) as any[]) {
+            const fq = `${schemaName}.${(table as any).name}`;
+            allowedTables.push(fq);
+
+            const cols: string[] = [];
+            for (const col of ((table as any)?.columns ?? []) as any[]) {
+                const t = (col as any);
+                const dt = t.type?.fullName || t.type?.name || t.type || 'unknown';
+                const nullable = t.notNull ? ' NOT NULL' : '';
+                cols.push(`${t.name} ${dt}${nullable}`);
+            }
+
+            // Primary key (if present)
+            const pkCols = (((table as any)?.primaryKey?.columns ?? []) as any[]).map(c => c.column.name);
+            if (pkCols.length > 0) {
+                cols.push(`PRIMARY KEY (${pkCols.join(', ')})`);
+            }
+
+            // Unique constraints (optional)
+            for (const uc of (((table as any)?.uniqueConstraints ?? []) as any[])) {
+                const names = ((uc.columns ?? []) as any[]).map((c: any) => c.column.name);
+                if (names.length > 0) cols.push(`UNIQUE (${names.join(', ')})`);
+            }
+
+            // Foreign keys (optional, summarized)
+            for (const fk of (((table as any)?.foreignKeys ?? []) as any[])) {
+                const fromCols = ((fk.columns ?? []) as any[]).map((c: any) => c.column.name);
+                const ref = fk.foreignTable as any;
+                const toSchema = ref?.schema?.name ?? schemaName;
+                const toTable = ref?.name ?? '';
+                const toCols = ((fk.foreignColumns ?? []) as any[]).map((c: any) => c.column.name);
+                if (fromCols.length > 0 && toTable) {
+                    cols.push(`FOREIGN KEY (${fromCols.join(', ')}) REFERENCES ${toSchema}.${toTable} (${toCols.join(', ')})`);
+                }
+            }
+
+            lines.push(`TABLE ${fq} ( ${cols.join(', ')} )`);
+        }
+    }
+    console.log(lines.join('\n'));
+    return { schemaText: lines.join('\n'), allowedTables };
 }
 
 // State definition using Annotation API
