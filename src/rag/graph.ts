@@ -284,6 +284,63 @@ async function nodeAnswer(state: typeof Schema.State) {
     const rowsSample = Array.isArray(rows) ? rows.slice(0, 10) : [];
     const rowsForStats = Array.isArray(rows) ? rows.slice(0, 100) : [];
 
+    // Helpers for formatting
+    const moneyNameHints = ['precio', 'monto', 'total', 'valor', 'costo', 'venta', 'ventas', 'importe', 'subtotal', 'neto', 'bruto'];
+    const isMoneyColumn = (name: string) => {
+        const n = (name || '').toString().toLowerCase();
+        return moneyNameHints.some(h => n.includes(h));
+    };
+    const clpFmt = new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    const toNumberMaybe = (v: any): number | null => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') {
+            const s = v.replace(/\s/g, '').replace(/\./g, '').replace(/,/g, '.');
+            const n = Number(s);
+            return Number.isFinite(n) ? n : null;
+        }
+        return null;
+    };
+    const formatCLP = (num: number) => {
+        if (typeof num !== 'number' || !Number.isFinite(num)) return '';
+        // Round to nearest peso
+        const rounded = Math.round(num);
+        if (rounded < 0) return `-${clpFmt.format(Math.abs(rounded))}`;
+        return clpFmt.format(rounded);
+    };
+    const escapeHtml = (str: string) => str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    const escapeCell = (v: any) => {
+        if (v === null || v === undefined) return '';
+        let s = typeof v === 'string' ? v : (typeof v === 'number' ? v.toString() : JSON.stringify(v));
+        s = s.replace(/\n|\r/g, ' ');
+        return escapeHtml(s);
+    };
+
+    // Build deterministic HTML results table (rehype-raw compatible)
+    let resultsHtml = '';
+    if (rowsSample.length > 0) {
+        const headers = Object.keys(rowsSample[0]);
+        const thead = `<thead><tr>${headers.map(h => `<th>${escapeCell(h)}</th>`).join('')}</tr></thead>`;
+        const tbodyRows = rowsSample.map(r => {
+            const tds = headers.map(h => {
+                const val = (r as any)[h];
+                if (isMoneyColumn(h)) {
+                    const n = toNumberMaybe(val);
+                    if (n !== null) return `<td>${escapeCell(formatCLP(n))}</td>`;
+                }
+                return `<td>${escapeCell(val)}</td>`;
+            }).join('');
+            return `<tr>${tds}</tr>`;
+        }).join('');
+        resultsHtml = `<table><caption>Resultados</caption>${thead}<tbody>${tbodyRows}</tbody></table>`;
+    } else {
+        resultsHtml = '<p><em>Sin filas para mostrar.</em></p>';
+    }
+
     // Detect numeric columns and compute simple stats
     const numericStats: Record<string, { count: number; min: number; max: number; avg: number }> = {};
     if (rowsForStats.length > 0) {
@@ -292,7 +349,8 @@ async function nodeAnswer(state: typeof Schema.State) {
             const nums: number[] = [];
             for (const r of rowsForStats) {
                 const v = (r as any)[k];
-                if (typeof v === 'number' && Number.isFinite(v)) nums.push(v);
+                const n = toNumberMaybe(v);
+                if (n !== null) nums.push(n);
             }
             if (nums.length > 0) {
                 const sum = nums.reduce((a, b) => a + b, 0);
@@ -304,11 +362,26 @@ async function nodeAnswer(state: typeof Schema.State) {
         }
     }
 
+    // Create a CLP-formatted view of stats for money-like columns
+    const numericStatsFormatted: Record<string, any> = {};
+    for (const [k, v] of Object.entries(numericStats)) {
+        if (isMoneyColumn(k)) {
+            numericStatsFormatted[k] = {
+                count: v.count,
+                min: formatCLP(v.min),
+                max: formatCLP(v.max),
+                avg: formatCLP(v.avg),
+            };
+        } else {
+            numericStatsFormatted[k] = v;
+        }
+    }
+
     // Detect referenced tables (best-effort) for context
     const { foundTables } = validateSqlTables((sql ?? '').toString(), Array.isArray(allowedTables) ? allowedTables : []);
 
-    const system = `Eres un analista de datos senior. Respondes en Español, con tono profesional y formato Markdown claro. Estructura SIEMPRE la salida en secciones con encabezados: \n- Resumen ejecutivo (breve, accionable)\n- Hallazgos clave (bullets)\n- Resultados (tabla Markdown hasta 10 filas)\n- Análisis (tendencias, outliers, comparaciones)\n- Recomendaciones (pasos accionables)\n- Limitaciones (calidad de datos, supuestos)\n- Próximos pasos.\n\nRequisitos de formato:\n- Formatea cualquier valor monetario como pesos chilenos (CLP) con el formato $1.234.567 (sin decimales, punto como separador de miles). Para valores negativos, usa -$1.234.567.\n- Genera tablas compatibles con remark-gfm usando sintaxis GFM (encabezado y separador con | y ---). No uses HTML.\n- Escapa el carácter | dentro de celdas como \\| y evita saltos de línea dentro de celdas (reemplázalos por espacio).\n\nNO incluyas la consulta SQL. Evita jerga innecesaria.`;
-    const user = `PREGUNTA: ${question}\nTABLAS REFERENCIADAS: ${foundTables.join(', ') || 'N/D'}\nFILAS (JSON) - muestra hasta 10:\n${JSON.stringify(rowsSample)}\nESTADÍSTICAS NUMÉRICAS (sobre muestra hasta 100):\n${JSON.stringify(numericStats)}\n${priorAnswer && priorAnswer.trim().length > 0 ? `\nNOTA (diagnóstico): ${priorAnswer}\n` : ''}\nGenera únicamente Markdown sin incluir la consulta SQL. Asegúrate de aplicar el formato CLP a valores monetarios y usa tablas estilo GFM (remark-gfm).`;
+    const system = `Eres un analista de datos senior. Respondes en Español, con tono profesional y formato Markdown claro. Estructura SIEMPRE la salida en secciones con encabezados: \n- Resumen ejecutivo (breve, accionable)\n- Hallazgos clave (bullets)\n- [[RESULTADOS_AQUI]]\n- Análisis (tendencias, outliers, comparaciones)\n- Recomendaciones (pasos accionables)\n- Limitaciones (calidad de datos, supuestos)\n- Próximos pasos.\n\nRequisitos de formato:\n- No inventes cifras ni modifiques los valores numéricos.\n- NO generes la tabla de resultados: en su lugar, coloca exactamente el marcador [[RESULTADOS_AQUI]] en la posición donde debe ir. Yo la insertaré como HTML (rehype-raw habilitado).\n- Formatea cualquier referencia textual a montos en CLP sin decimales cuando corresponda, pero nunca alteres cantidades.\n- Puedes usar Markdown y HTML simple para las secciones narrativas (sin scripts ni estilos).\n\nNO incluyas la consulta SQL. Evita jerga innecesaria.`;
+    const user = `PREGUNTA: ${question}\nTABLAS REFERENCIADAS: ${foundTables.join(', ') || 'N/D'}\nFILAS (JSON) - muestra hasta 10 (los valores ya se formatearán automáticamente en la tabla):\n${JSON.stringify(rowsSample)}\nESTADÍSTICAS NUMÉRICAS (sobre muestra hasta 100) — usa estos valores VERBATIM si los mencionas:\n${JSON.stringify(numericStatsFormatted)}\n${priorAnswer && priorAnswer.trim().length > 0 ? `\nNOTA (diagnóstico): ${priorAnswer}\n` : ''}\nInstrucciones: Genera solo las secciones narrativas y coloca el marcador [[RESULTADOS_AQUI]] para la sección de Resultados. No cambies cifras.`;
 
     const llm = new ChatOpenAI({ model: OPENAI_MODEL, temperature: 0 });
     const msg = await llm.invoke([
@@ -319,8 +392,15 @@ async function nodeAnswer(state: typeof Schema.State) {
     if (Array.isArray(msg.content)) {
         md = msg.content.map((c: any) => (typeof c === 'string' ? c : c.text || '')).join('\n');
     }
-    // Ensure it's Markdown text
-    const answer = md?.toString()?.trim() || priorAnswer || 'Sin resultados.';
+    // Inject the deterministic results section as HTML
+    const resultsSection = `${resultsHtml}${rows && rows.length > 10 ? `\n\n<p><em>Mostrando 10 de ${rows.length} filas.</em></p>` : ''}`;
+    let finalMd = (md?.toString() || '').trim();
+    if (finalMd.includes('[[RESULTADOS_AQUI]]')) {
+        finalMd = finalMd.replace('[[RESULTADOS_AQUI]]', resultsSection);
+    } else {
+        finalMd = `${finalMd}\n\n${resultsSection}`.trim();
+    }
+    const answer = finalMd || priorAnswer || 'Sin resultados.';
     return { answer };
 }
 
